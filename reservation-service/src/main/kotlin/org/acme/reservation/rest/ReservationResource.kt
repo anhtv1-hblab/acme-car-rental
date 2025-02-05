@@ -5,6 +5,7 @@ import io.quarkus.hibernate.reactive.panache.common.WithTransaction
 import io.quarkus.logging.Log
 import io.smallrye.graphql.client.GraphQLClient
 import io.smallrye.mutiny.Uni
+import io.smallrye.reactive.messaging.MutinyEmitter
 import jakarta.inject.Inject
 import jakarta.ws.rs.Consumes
 import jakarta.ws.rs.GET
@@ -13,11 +14,13 @@ import jakarta.ws.rs.Path
 import jakarta.ws.rs.Produces
 import jakarta.ws.rs.core.MediaType
 import jakarta.ws.rs.core.SecurityContext
+import org.acme.reservation.billing.Invoice
 import org.acme.reservation.entity.Reservation
 import org.acme.reservation.inventory.Car
 import org.acme.reservation.inventory.GraphQLInventoryClient
 import org.acme.reservation.rental.RentalClient
 import org.acme.reservation.repository.ReservationRepository
+import org.eclipse.microprofile.reactive.messaging.Channel
 import org.eclipse.microprofile.rest.client.inject.RestClient
 import org.jboss.resteasy.reactive.RestQuery
 import java.time.LocalDate
@@ -28,45 +31,42 @@ class ReservationResource @Inject constructor(
         @GraphQLClient("inventory") private val inventoryClient: GraphQLInventoryClient,
         @RestClient private val rentalClient: RentalClient,
         private val context: SecurityContext,
-        private val reservationRepository: ReservationRepository
+        private val reservationRepository: ReservationRepository,
+        @Channel("invoices") private val invoiceEmitter: MutinyEmitter<Invoice>
 ) {
+    companion object {
+        const val STANDARD_RATE_PER_DAY = 19.99
+    }
 
     @Consumes(MediaType.APPLICATION_JSON)
     @POST
     @WithTransaction
     fun make(reservation: Reservation): Uni<Reservation> {
-//        reservation.id = null
-//        reservation.userId = context.userPrincipal?.name ?: "anonymous"
-
-//        reservationRepository.persist(reservation)  // Persist new reservation
-//        reservationRepository.flush()  // Ensure ID is assigned before further processing
-
-//        return reservation.persist<Reservation>().onItem()
-//                .call { persistedReservation ->
-//                    Log.info("Successfully reserved reservation $persistedReservation")
-//                    if (persistedReservation.startDay == LocalDate.now()) {
-//                        return@call rentalClient.start(persistedReservation.userId, persistedReservation.id)
-//                                .onItem().invoke { rental ->
-//                                    Log.info("Successfully started rental $rental")
-//                                }
-//                                .replaceWith(persistedReservation)
-//                    }
-//                    Uni.createFrom().item(persistedReservation)
-//                }
         return Panache.withTransaction {
             reservation.id = null
             reservation.userId = context.userPrincipal?.name ?: "anonymous"
-            reservationRepository.persistAndFlush(reservation).onItem()
-                    .call { persistedReservation ->
+            reservationRepository.persistAndFlush(reservation)
+                    .onItem().call { persistedReservation ->
                         Log.info("Successfully reserved reservation $persistedReservation")
+
+                        // Tính toán giá tiền và gửi invoice
+                        val invoice = Invoice(persistedReservation, computePrice(persistedReservation))
+                        val invoiceUni = invoiceEmitter.send(invoice)
+                                .onFailure().invoke { throwable ->
+                                    Log.errorf("Couldn't create invoice for %s. %s", persistedReservation, throwable.message)
+                                }
+
                         if (persistedReservation.startDay == LocalDate.now()) {
-                            return@call rentalClient.start(persistedReservation.userId, persistedReservation.id)
-                                    .onItem().invoke { rental ->
-                                        Log.info("Successfully started rental $rental")
-                                    }
-                                    .replaceWith(persistedReservation)
+                            invoiceUni.chain { _: Void? ->
+                            rentalClient.start(persistedReservation.userId, persistedReservation.id)
+                                        .onItem().invoke { rental ->
+                                            Log.info("Successfully started rental $rental")
+                                        }
+                                        .replaceWith(persistedReservation)
+                            }
+                        } else {
+                            invoiceUni.replaceWith(persistedReservation)
                         }
-                        Uni.createFrom().item(persistedReservation)
                     }
         }
     }
@@ -99,5 +99,9 @@ class ReservationResource @Inject constructor(
                 .onItem().transform { reservations ->
                     reservations.filter { userId == null || it.userId == userId }
                 }
+    }
+
+    private fun computePrice(reservation: Reservation): Double {
+        return (reservation.startDay.until(reservation.endDay).days + 1) * STANDARD_RATE_PER_DAY
     }
 }
