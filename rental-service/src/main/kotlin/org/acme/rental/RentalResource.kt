@@ -1,35 +1,41 @@
 package org.acme.rental
 
 import io.quarkus.logging.Log
+import io.smallrye.mutiny.Uni
 import jakarta.inject.Inject
-import jakarta.ws.rs.Consumes
 import jakarta.ws.rs.GET
 import jakarta.ws.rs.NotFoundException
 import jakarta.ws.rs.POST
 import jakarta.ws.rs.PUT
 import jakarta.ws.rs.Path
 import jakarta.ws.rs.PathParam
-import jakarta.ws.rs.Produces
-import jakarta.ws.rs.core.MediaType
+import org.acme.rental.billing.InvoiceAdjust
 import org.acme.rental.entity.Rental
 import org.acme.rental.repository.RentalRepository
+import org.acme.rental.reservation.ReservationClient
+import org.eclipse.microprofile.reactive.messaging.Channel
+import org.eclipse.microprofile.reactive.messaging.Emitter
+import org.eclipse.microprofile.rest.client.inject.RestClient
 import java.time.LocalDate
-import java.util.concurrent.atomic.AtomicLong
+import java.time.temporal.ChronoUnit
 
 @Path("/rental")
-class RentalResource {
+class RentalResource @Inject constructor(
+        @RestClient private val reservationClient: ReservationClient,
+        @Channel("invoices-adjust") private val adjustmentEmitter: Emitter<InvoiceAdjust>,
+        private val rentalRepository: RentalRepository
+) {
 
-    @Inject
-    lateinit var rentalRepository: RentalRepository
+    companion object {
+        const val STANDARD_REFUND_RATE_PER_DAY = -10.99
+        const val STANDARD_PRICE_FOR_PROLONGED_DAY = 25.99
+    }
 
     @POST
     @Path("/start/{userId}/{reservationId}")
     fun start(@PathParam("userId") userId: String,
               @PathParam("reservationId") reservationId: Long): Rental {
-        Log.infof("Starting rental for user '%s' with reservation ID '%s'", userId, reservationId)
-
-        require(userId.isNotEmpty()) { "Invalid userId" }
-        require(reservationId > 0) { "Invalid reservationId" }
+        Log.info("Starting rental for user $userId with reservation ID $reservationId")
 
         val rental = Rental().apply {
             this.userId = userId
@@ -43,26 +49,29 @@ class RentalResource {
 
     @PUT
     @Path("/end/{userId}/{reservationId}")
-    fun end(@PathParam("userId") userId: String,
-            @PathParam("reservationId") reservationId: Long): Rental {
-        Log.infof("Ending rental for user '%s' with reservation ID '%s'", userId, reservationId)
+    fun end(
+            @PathParam("userId") userId: String,
+            @PathParam("reservationId") reservationId: Long
+    ): Rental {
+        Log.info("Ending rental for $userId with reservation $reservationId")
 
-        require(userId.isNotEmpty()) { "Invalid userId" }
-        require(reservationId > 0) { "Invalid reservationId" }
+        val rental = rentalRepository.findByUserAndReservationIdOptional(userId, reservationId).orElseThrow{ NotFoundException("Rental not found") }
 
-        val optionalRental = rentalRepository.findByUserAndReservationIdOptional(userId, reservationId)
-        return if (optionalRental.isPresent) {
-            val rental = optionalRental.get().apply {
-                this.endDate = LocalDate.now()
-                this.active = false
-            }
-            rental.update()
-            Log.infof("Rental ended: %s", rental)
-            rental
-        } else {
-            Log.errorf("Rental not found for user '%s' with reservation ID '%s'", userId, reservationId)
-            throw NotFoundException("Rental not found")
+        val reservation = reservationClient.getById(reservationId)
+        val today = LocalDate.now()
+
+        if (!reservation.endDay.isEqual(today)) {
+            Log.info("Adjusting price for rental $rental. Original reservation end day was ${reservation.endDay}.")
+            adjustmentEmitter.send(InvoiceAdjust(
+                    rental.id.toString(), userId, today,
+                    computePrice(reservation.endDay, today)
+            ))
         }
+
+        rental.endDate = today
+        rental.active = false
+        rental.update()
+        return rental
     }
 
     @GET
@@ -76,5 +85,13 @@ class RentalResource {
     fun listActive(): List<Rental> {
         Log.info("Fetching active rentals")
         return rentalRepository.listActive()
+    }
+
+    private fun computePrice(endDate: LocalDate, today: LocalDate): Double {
+        return if (endDate.isBefore(today)) {
+            ChronoUnit.DAYS.between(endDate, today) * STANDARD_PRICE_FOR_PROLONGED_DAY
+        } else {
+            ChronoUnit.DAYS.between(today, endDate) * STANDARD_REFUND_RATE_PER_DAY
+        }
     }
 }
