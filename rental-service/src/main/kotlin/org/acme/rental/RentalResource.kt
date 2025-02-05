@@ -37,13 +37,20 @@ class RentalResource @Inject constructor(
               @PathParam("reservationId") reservationId: Long): Rental {
         Log.info("Starting rental for user $userId with reservation ID $reservationId")
 
-        val rental = Rental().apply {
-            this.userId = userId
-            this.reservationId = reservationId
-            this.startDate = LocalDate.now()
-            this.active = true
+        val rentalOptional = rentalRepository.findByUserAndReservationIdOptional(userId, reservationId)
+
+        val rental = rentalOptional.orElseGet{
+            Rental().apply {
+                this.userId = userId
+                this.reservationId = reservationId
+                this.startDate = LocalDate.now()
+                this.active = true
+                persist()
+            }
         }
-        rental.persist()
+
+        rental.active = true
+        rental.update()
         return rental
     }
 
@@ -56,6 +63,11 @@ class RentalResource @Inject constructor(
         Log.info("Ending rental for $userId with reservation $reservationId")
 
         val rental = rentalRepository.findByUserAndReservationIdOptional(userId, reservationId).orElseThrow{ NotFoundException("Rental not found") }
+
+        if (!rental.paid) {
+            Log.warn("Rental is not paid: $rental")
+            // Trigger error processing
+        }
 
         val reservation = reservationClient.getById(reservationId)
         val today = LocalDate.now()
