@@ -1,4 +1,4 @@
-for docker-compose-files
+- metrics
 
 ```shell
     docker compose -f docker-compose-metrics.yml up
@@ -8,3 +8,12 @@ for docker-compose-files
     docker compose -f docker-compose-metrics.yml down
 ```   
 
+- tracing
+
+```shell
+    docker compose -f docker-compose-tracing.yml up
+```    
+
+```shell
+    docker compose -f docker-compose-tracing.yml down
+``` 
