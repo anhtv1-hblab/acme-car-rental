@@ -1,5 +1,6 @@
 package org.acme.inventory.service
 
+import io.micrometer.core.annotation.Counted
 import io.quarkus.logging.Log
 import jakarta.inject.Inject
 import jakarta.transaction.Transactional
@@ -19,6 +20,7 @@ class GraphQLInventoryService {
         return carRepository.listAll()
     }
 
+    @Counted(description = "Number of car registrations")
     @Transactional
     @Mutation
     fun register(car: Car): Car {

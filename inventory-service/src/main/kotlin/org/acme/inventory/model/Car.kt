@@ -12,8 +12,8 @@ data class Car(
         @Id @GeneratedValue(strategy = GenerationType.IDENTITY)
         var id: Long? = null,
         var licensePlateNumber: String,
-        var manufacturer: String,
-        var model: String,
+        var manufacturer: String? = null,
+        var model: String? = null,
 ) {
     constructor() : this(null, "", "", "")
 }
