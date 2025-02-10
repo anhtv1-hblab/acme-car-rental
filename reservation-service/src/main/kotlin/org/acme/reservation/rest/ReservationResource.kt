@@ -20,6 +20,8 @@ import org.acme.reservation.inventory.Car
 import org.acme.reservation.inventory.GraphQLInventoryClient
 import org.acme.reservation.rental.RentalClient
 import org.acme.reservation.repository.ReservationRepository
+import org.eclipse.microprofile.faulttolerance.Fallback
+import org.eclipse.microprofile.faulttolerance.Retry
 import org.eclipse.microprofile.reactive.messaging.Channel
 import org.eclipse.microprofile.rest.client.inject.RestClient
 import org.jboss.resteasy.reactive.RestQuery
@@ -58,7 +60,7 @@ class ReservationResource @Inject constructor(
 
                         if (persistedReservation.startDay == LocalDate.now()) {
                             invoiceUni.chain { _: Void? ->
-                            rentalClient.start(persistedReservation.userId, persistedReservation.id)
+                                rentalClient.start(persistedReservation.userId, persistedReservation.id)
                                         .onItem().invoke { rental ->
                                             Log.info("Successfully started rental $rental")
                                         }
@@ -71,6 +73,8 @@ class ReservationResource @Inject constructor(
         }
     }
 
+    @Retry(maxRetries = 25, delay = 1000)
+    @Fallback(fallbackMethod = "availabilityFallback")
     @GET
     @Path("availability")
     fun availability(
